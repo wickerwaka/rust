@@ -27,17 +27,17 @@ mod rustrt {
 }
 
 extern fn cb(data: libc::uintptr_t) -> libc::uintptr_t {
-    if data == 1u {
+    if data == 1 {
         data
     } else {
-        count(data - 1u) + count(data - 1u)
+        count(data - 1) + count(data - 1)
     }
 }
 
 fn count(n: uint) -> uint {
     unsafe {
         println!("n = {}", n);
-        rustrt::rust_dbg_call(cb, n)
+        rustrt::rust_dbg_call(cb, n as libc::uintptr_t) as uint
     }
 }
 
