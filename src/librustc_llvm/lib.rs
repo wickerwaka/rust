@@ -387,6 +387,8 @@ pub enum ObjectFile_opaque {}
 pub type ObjectFileRef = *mut ObjectFile_opaque;
 pub enum SectionIterator_opaque {}
 pub type SectionIteratorRef = *mut SectionIterator_opaque;
+pub enum SymbolIterator_opaque {}
+pub type SymbolIteratorRef = *mut SymbolIterator_opaque;
 pub enum Pass_opaque {}
 pub type PassRef = *mut Pass_opaque;
 pub enum TargetMachine_opaque {}
@@ -1564,6 +1566,18 @@ extern {
     pub fn LLVMGetSectionSize(SI: SectionIteratorRef) -> c_ulonglong;
     /** Returns the current section contents as a string buffer. */
     pub fn LLVMGetSectionContents(SI: SectionIteratorRef) -> *const c_char;
+
+	pub fn LLVMGetSymbols(ObjFile: ObjectFileRef) -> SymbolIteratorRef;
+	pub fn LLVMDisposeSymbolIterator(SI: SymbolIteratorRef);
+	pub fn LLVMIsSymbolIteratorAtEnd(ObjFile: ObjectFileRef,
+										SI: SymbolIteratorRef)
+										-> Bool;
+	pub fn LLVMMoveToNextSymbol(SI: SymbolIteratorRef);
+	pub fn LLVMGetSymbolName(SI: SymbolIteratorRef) -> *const c_char;
+	pub fn LLVMGetSymbolAddress(SI: SymbolIteratorRef) -> u64;
+	pub fn LLVMGetSymbolSize(SI: SymbolIteratorRef) -> u64;
+	pub fn LLVMGetSymbolFlags(SI: SymbolIteratorRef) -> u32;
+
 
     /** Reads the given file and returns it as a memory buffer. Use
     LLVMDisposeMemoryBuffer() to get rid of it. */

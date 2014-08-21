@@ -814,6 +814,16 @@ LLVMRustGetSectionName(LLVMSectionIteratorRef SI, const char **ptr) {
     return ret.size();
 }
 
+inline symbol_iterator *unwrap(LLVMSymbolIteratorRef SI) {
+    return reinterpret_cast<symbol_iterator*>(SI);
+}
+
+extern "C" uint32_t
+LLVMRustGetSymbolFlags(LLVMSymbolIteratorRef SI) {
+  return (*unwrap(SI))->getFlags();
+}
+
+
 // LLVMArrayType function does not support 64-bit ElementCount
 extern "C" LLVMTypeRef
 LLVMRustArrayType(LLVMTypeRef ElementType, uint64_t ElementCount) {

@@ -16,9 +16,15 @@
 #![crate_type = "rlib"]
 #![crate_type = "bin"]
 
+
+extern crate llvm = "rustc_llvm";
+extern crate libc;
+
 use std::os;
 use std::str::{from_utf8};
-use std::io::{File, IoError};
+use std::io::{File, IoError, EndOfFile};
+use libc::{size_t, c_char};
+
 
 static MAGIC: &'static [u8] = b"!<arch>\n";
 static FMAG: &'static str = "`\n";
@@ -29,6 +35,27 @@ static ID_LEN : uint = 6u;
 static MODE_LEN : uint = 8u;
 static SIZE_LEN : uint = 10u;
 
+enum Format {
+	BSD,
+	GNU,
+	COFF,
+}
+
+/*
+pub struct Config {
+	format: Option<Format>,
+	force_extended_names: bool
+}
+
+impl Config {
+	fn new() -> Config {
+		Config {
+			format: None,
+			force_extended_names: false
+		}
+	}
+}
+*/
 
 #[deriving(Show)]
 pub struct Member {
@@ -42,6 +69,7 @@ pub struct Member {
 }
 
 pub struct Archive {
+	format: Format,
 	path: Path,
 	members: Vec<Member>,
 }
@@ -56,6 +84,36 @@ pub enum ArchiveError {
 	StringTooLong,
 	InvalidMagic,
 	InvalidMemberMagic,
+	DuplicateStringTable,
+	MissingStringTable
+}
+
+pub enum NameEncoding {
+	BSDSimple(String),
+	GNUSimple(String),
+	BSDExtended(uint),
+	GNUExtended(uint),
+}
+
+fn decode_name( name: &str ) -> Result<NameEncoding, ArchiveError> {
+	if name.starts_with( "#1/" ) {
+		let name_len = try!( parse_uint( name.slice_from(3), 10, "BSD name length" ) );
+		return Ok(BSDExtended(name_len));
+	}
+
+	match name.rfind( '/' ) {
+		Some(0) => {
+			match name.char_at(1) {
+				' ' => Ok(GNUSimple( "/".to_string() )),
+				_ => {
+					let name_offset = try!( parse_uint( name.slice_from(1), 10, "GNU name offset" ) );
+					Ok(GNUExtended(name_offset))
+				}
+			}
+		},
+		Some(idx) => Ok(GNUSimple( name.slice_to(idx).to_string() )),
+		None => Ok(BSDSimple( name.trim_right_chars( ' ' ).to_string() )),
+	}
 }
 
 fn read_string<T: Reader>( reader: &mut T, len: uint, reason: &'static str ) -> Result<String, ArchiveError> {
@@ -91,9 +149,9 @@ fn write_uint<T: Writer>( writer: &mut T, len: uint, radix: uint, v: uint ) -> R
 
 
 fn parse_uint( s: &str, radix: uint, reason: &'static str ) -> Result<uint, ArchiveError> {
-	let num_str = s.splitn( 1, ' ' ).nth(0).unwrap();
+	let num_str = s.trim_right_chars( ' ' );
 	if num_str.len() == 0 {
-		return Ok(0u);
+		return Ok(0u); // GNU sometimes writes nothing instead of 0
 	}
 	match std::num::from_str_radix( num_str, radix ) {
 		Some(i) => Ok(i),
@@ -109,14 +167,77 @@ fn read_uint<T: Reader>( reader: &mut T, len: uint, radix: uint, reason: &'stati
 	parse_uint( s.as_slice(), radix, reason )
 }
 
+struct SimpleReader<'a> {
+	data: &'a[u8],
+}
+
+impl<'a> SimpleReader<'a> {
+	fn new( data: &'a[u8] ) -> SimpleReader {
+		SimpleReader {
+			data: data
+		}
+	}
+
+	fn read_u32_at( &mut self, offset: uint ) -> Option<u32> {
+		if offset + 4 > self.data.len() {
+			return None
+		}
+
+		let mut result : u32 = 0;
+
+		unsafe {
+			let src = self.data.slice_from(offset).as_ptr();
+			let dst : *mut u8 = std::intrinsics::transmute( &mut result );
+			std::intrinsics::copy_memory( dst, src, 4 );
+		};
+		Some(result)
+	}
+
+	fn read_string_at( &mut self, offset: uint ) -> Option<&str> {
+		if offset >= self.data.len() {
+			return None;
+		}
+
+		let slc = self.data.slice_from(offset);
+		
+		match slc.position_elem( &0u8 ) {
+			Some(x) => {
+				std::str::from_utf8( slc.slice_to( x ) )
+			},
+			None => {
+				std::str::from_utf8( slc )
+			}
+		}
+	}
+
+}
+
+fn read_symbol_table_bsd( member: &Member ) -> Result<(), ArchiveError> {
+	let mut reader = SimpleReader::new( member.data.as_slice() );
+
+	let ranlib_size = reader.read_u32_at(0).unwrap_or(0) as uint;
+	//let table_size = reader.read_u32_at(ranlib_size + 4).unwrap_or(0) as uint;
+	let table_offset = ranlib_size + 8u;
+
+	for i in std::iter::range_step(4, ranlib_size + 4, 8) {
+		let string_offset = reader.read_u32_at(i).unwrap_or(0) as uint;
+		let header_offset = reader.read_u32_at(i+4).unwrap_or(0);
+		let sym_name = reader.read_string_at(string_offset + table_offset).unwrap();
+		println!( "{} {} {}", string_offset, header_offset, sym_name );
+	}
+
+	Ok(())
+}
+
+
 impl Member {
-	fn read<T: Reader + Seek>( reader: &mut T ) -> Result<Member, ArchiveError> {
+	fn read<T: Reader + Seek>( reader: &mut T, string_table: &Option<Vec<u8>> ) -> Result<Member, ArchiveError> {
 		let offset = match reader.tell() {
 			Err(x) => return Err(ArchiveIoError(x, "determining offset")),
 			Ok(x) => x
 		};
 
-		let mut name = match read_string( reader, NAME_LEN, "member name" ) {
+		let ar_name = match read_string( reader, NAME_LEN, "member name" ) {
 			Err(ArchiveIoError(ref e, _)) if e.kind == std::io::EndOfFile => {
 				return Err(NoMoreMembers)
 			},
@@ -135,11 +256,30 @@ impl Member {
 			return Err(InvalidMemberMagic);
 		}
 
-		if name.as_slice().starts_with( "#1/" ) {
-			let name_len = try!( parse_uint( name.as_slice().slice_from(3), 10, "extended name length" ) );
-			name = try!( read_string( reader, name_len, "extended name" ) );
-			size -= name_len;
-		}
+		let name = match try!( decode_name( ar_name.as_slice() ) ) { 
+			BSDSimple(s) => s,
+			GNUSimple(s) => s,
+			BSDExtended(len) => {
+				size -= len;
+				try!( read_string( reader, len, "BSD extended name" ) )
+			},
+			GNUExtended(ofs) => {
+				match *string_table {
+					None => return Err(MissingStringTable),
+					Some(ref tbl) => {
+						let slc = tbl.slice_from(ofs);
+						let sub = match slc.iter().position( |c| *c == '/' as u8 ) {
+							None => slc,
+							Some(x) => slc.slice_to(x)
+						};
+						match std::str::from_utf8( sub ) {
+							None => return Err(InvalidString( "in string table" )),
+							Some(s) => String::from_str(s),
+						}
+					}
+				}
+			}
+		};
 
 		let data = match reader.read_exact( size ) {
 			Ok(e) => e,
@@ -179,9 +319,12 @@ impl Member {
 impl Archive {
 	pub fn open(path: &Path) -> Result<Archive, ArchiveError> {
 		let mut f = File::open( path );
+		Archive::read( &mut f, path )
+	}
 
+	pub fn read<T: Reader + Seek>(reader: &mut T, path: &Path) -> Result<Archive, ArchiveError> {
 		let magic = try!(
-			f.read_exact( MAGIC.len() ).map_err(
+			reader.read_exact( MAGIC.len() ).map_err(
 				|err| ArchiveIoError( err, "reading magic" )
 				)
 			);
@@ -191,17 +334,30 @@ impl Archive {
 		}
 
 		let mut members = Vec::new();
+		let mut string_table = None;
 
 		loop {
-			let member = match Member::read( &mut f ) {
+			let member = match Member::read( reader, &string_table ) {
 				Err(NoMoreMembers) => break,
 				Err(e) => return Err(e),
 				Ok(m) => m
 			};
+
+			if member.name.as_slice() == "/" {
+				match string_table {
+					None => string_table = Some( member.data.clone() ),
+					Some(_) => return Err(DuplicateStringTable)
+				};
+			}
+
+			if member.name.as_slice().starts_with( "__.SYMDEF" ) {
+				try!( read_symbol_table_bsd( &member ) );
+			}
+
 			members.push( member );
 		}
 
-		Ok( Archive{ path: path.clone(), members: members } )
+		Ok( Archive{ path: path.clone(), members: members, format: BSD } )
 	}
 	
 	pub fn write(&self) -> Result<(), ArchiveError> {
@@ -221,6 +377,47 @@ impl Archive {
 	}
 }
 
+struct MemoryBuffer<'a> {
+	//data: &'a[u8],
+	pub llmb: llvm::MemoryBufferRef
+}
+
+impl<'a> MemoryBuffer<'a> {
+	pub fn new<'a>( data: &'a[u8], name: &str ) -> Option<MemoryBuffer<'a>> {
+		let buf = data.as_ptr() as *const c_char;
+		let lbuf = "hello.o".with_c_str( |name| unsafe {
+			llvm::LLVMCreateMemoryBufferWithMemoryRange( buf, data.len() as size_t, name, 0u32 )
+		} );
+		
+		if lbuf as int == 0 {
+			return None
+		}
+		Some( MemoryBuffer {
+			/*data: data,*/
+			llmb: lbuf
+		} )
+	}
+}
+
+
+fn read_symbols( member: &Member ) {
+	match MemoryBuffer::new( member.data.as_slice(), member.name.as_slice() ) {
+		None => return,
+		Some(buf) => {
+			let obj = llvm::ObjectFile::new( buf.llmb ).unwrap();
+			unsafe {
+				let syms = llvm::LLVMGetSymbols( obj.llof );
+				while llvm::LLVMIsSymbolIteratorAtEnd( obj.llof, syms ) == llvm::False {
+					let namebuf = llvm::LLVMGetSymbolName( syms ) as *const u8;
+					let name = std::string::raw::from_buf( namebuf );
+					println!( "{}", name );
+					llvm::LLVMMoveToNextSymbol( syms );
+				}
+			}
+		}
+	}
+}
+
 fn main() {
 	let args = os::args();
 	let path = &Path::new( args[1].clone() );
@@ -228,7 +425,11 @@ fn main() {
 		Err(x) => println!( "Error reading archive {}: {}", path.display(), x ),
 		Ok(x) => {
 			for m in x.members.iter() {
-				println!( "{}: {}", m.name, m.data.len() );
+				println!( "'{}'", m.name );
+				if m.name.as_slice().contains( ".o" ) {
+					println!( "{}: {}", m.name, m.data.len() );
+					read_symbols( m );
+				}
 			}
 			match x.write() {
 				Ok(_) => {},
