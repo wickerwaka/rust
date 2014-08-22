@@ -53,12 +53,13 @@ This file consists of three conceptual sections:
 3. Minor utility functions
 
 
-## Recursive Types Some kinds of types, such as structs and enums can be
-recursive. That means that the type definition of some type X refers to some
-other type which in turn (transitively) refers to X. This introduces cycles into
-the type referral graph. A naive algorithm doing an on-demand, depth-first
-traversal of this graph when describing types, can get trapped in an endless
-loop when it reaches such a cycle.
+## Recursive Types
+
+Some kinds of types, such as structs and enums can be recursive. That means that
+the type definition of some type X refers to some other type which in turn (transitively)
+refers to X. This introduces cycles into the type referral graph. A naive algorithm doing
+an on-demand, depth-first traversal of this graph when describing types, can get trapped
+in an endless loop when it reaches such a cycle.
 
 For example, the following simple type for a singly-linked list...
 
@@ -96,10 +97,12 @@ traversal at the type members after the type has been registered with the cache.
 the future)
 
 
-## Source Locations and Line Information In addition to data type descriptions
-the debugging information must also allow to map machine code locations back to
-source code locations in order to be useful. This functionality is also handled
-in this module. The following functions allow to control source mappings:
+## Source Locations and Line Information
+
+In addition to data type descriptions the debugging information must also allow
+to map machine code locations back to source code locations in order to be useful.
+This functionality is also handled in this module. The following functions allow
+to control source mappings:
 
 + set_source_location()
 + clear_source_location()
@@ -139,10 +142,12 @@ of the prologue, however, they are ignored by LLVM's prologue detection. The
 source location emission is still disabled, so there is no need to do anything
 special with source location handling here.
 
-## Unique Type Identification In order for link-time optimization to work
-properly, LLVM needs a unique type identifier that tells it across compilation
-units which types are the same as others. This type identifier is created by
-TypeMap::get_unique_type_id_of_type() using the following algorithm:
+## Unique Type Identification
+
+In order for link-time optimization to work properly, LLVM needs a unique type
+identifier that tells it across compilation units which types are the same as
+others. This type identifier is created by TypeMap::get_unique_type_id_of_type()
+using the following algorithm:
 
 (1) Primitive types have their name as ID
 (2) Structs, enums and traits have a multipart identifier
@@ -1128,6 +1133,10 @@ pub fn create_function_debug_context(cx: &CrateContext,
 
     let (ident, fn_decl, generics, top_level_block, span, has_path) = match fnitem {
         ast_map::NodeItem(ref item) => {
+            if contains_nodebug_attribute(item.attrs.as_slice()) {
+                return FunctionDebugContext { repr: FunctionWithoutDebugInfo };
+            }
+
             match item.node {
                 ast::ItemFn(fn_decl, _, _, ref generics, top_level_block) => {
                     (item.ident, fn_decl, generics, top_level_block, item.span, true)
@@ -1141,6 +1150,12 @@ pub fn create_function_debug_context(cx: &CrateContext,
         ast_map::NodeImplItem(ref item) => {
             match **item {
                 ast::MethodImplItem(ref method) => {
+                    if contains_nodebug_attribute(method.attrs.as_slice()) {
+                        return FunctionDebugContext {
+                            repr: FunctionWithoutDebugInfo
+                        };
+                    }
+
                     (method.pe_ident(),
                      method.pe_fn_decl(),
                      method.pe_generics(),
@@ -1173,6 +1188,12 @@ pub fn create_function_debug_context(cx: &CrateContext,
         ast_map::NodeTraitItem(ref trait_method) => {
             match **trait_method {
                 ast::ProvidedMethod(ref method) => {
+                    if contains_nodebug_attribute(method.attrs.as_slice()) {
+                        return FunctionDebugContext {
+                            repr: FunctionWithoutDebugInfo
+                        };
+                    }
+
                     (method.pe_ident(),
                      method.pe_fn_decl(),
                      method.pe_generics(),
@@ -3169,6 +3190,16 @@ fn set_debug_location(cx: &CrateContext, debug_location: DebugLocation) {
 //  Utility Functions
 //=-----------------------------------------------------------------------------
 
+fn contains_nodebug_attribute(attributes: &[ast::Attribute]) -> bool {
+    attributes.iter().any(|attr| {
+        let meta_item: &ast::MetaItem = &*attr.node.value;
+        match meta_item.node {
+            ast::MetaWord(ref value) => value.get() == "no_debug",
+            _ => false
+        }
+    })
+}
+
 /// Return codemap::Loc corresponding to the beginning of the span
 fn span_start(cx: &CrateContext, span: Span) -> codemap::Loc {
     cx.sess().codemap().lookup_char_pos(span.lo)
@@ -3698,7 +3729,7 @@ fn populate_scope_map(cx: &CrateContext,
                     walk_expr(cx, &**exp, scope_stack, scope_map);
                 }
 
-                for &(_, ref exp) in outputs.iter() {
+                for &(_, ref exp, _) in outputs.iter() {
                     walk_expr(cx, &**exp, scope_stack, scope_map);
                 }
             }

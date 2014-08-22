@@ -21,7 +21,7 @@ by the compiler automatically for the types to which they apply.
 */
 
 #[deprecated = "This has been renamed to Sync"]
-pub use Share = self::Sync;
+pub use self::Sync as Share;
 
 /// Types able to be transferred across task boundaries.
 #[lang="send"]
@@ -87,13 +87,6 @@ pub trait Copy {
 /// reference; not doing this is undefined behaviour (for example,
 /// `transmute`-ing from `&T` to `&mut T` is illegal).
 #[lang="sync"]
-#[cfg(not(stage0))]
-pub trait Sync {
-    // Empty
-}
-/// dox
-#[lang="share"]
-#[cfg(stage0)]
 pub trait Sync {
     // Empty
 }

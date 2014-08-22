@@ -47,11 +47,17 @@ use middle::trans::builder::{Builder, noname};
 use middle::trans::callee;
 use middle::trans::cleanup::{CleanupMethods, ScopeId};
 use middle::trans::cleanup;
-use middle::trans::common::*;
+use middle::trans::common::{Block, C_bool, C_bytes, C_i32, C_integral, C_nil};
+use middle::trans::common::{C_null, C_struct, C_u64, C_u8, C_uint, C_undef};
+use middle::trans::common::{CrateContext, ExternMap, FunctionContext};
+use middle::trans::common::{NodeInfo, Result, SubstP, monomorphize_type};
+use middle::trans::common::{node_id_type, param_substs, return_type_is_void};
+use middle::trans::common::{tydesc_info, type_is_immediate};
+use middle::trans::common::{type_is_zero_size, val_ty};
+use middle::trans::common;
 use middle::trans::consts;
 use middle::trans::controlflow;
 use middle::trans::datum;
-// use middle::trans::datum::{Datum, Lvalue, Rvalue, ByRef, ByValue};
 use middle::trans::debuginfo;
 use middle::trans::expr;
 use middle::trans::foreign;
@@ -81,7 +87,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::{i8, i16, i32, i64};
 use syntax::abi::{X86, X86_64, Arm, Mips, Mipsel, Rust, RustCall};
-use syntax::abi::{RustIntrinsic, Abi};
+use syntax::abi::{RustIntrinsic, Abi, OsWindows};
 use syntax::ast_util::{local_def, is_local};
 use syntax::attr::AttrMetaMethods;
 use syntax::attr;
@@ -1074,7 +1080,7 @@ pub fn raw_block<'a>(
                  is_lpad: bool,
                  llbb: BasicBlockRef)
                  -> &'a Block<'a> {
-    Block::new(llbb, is_lpad, None, fcx)
+    common::Block::new(llbb, is_lpad, None, fcx)
 }
 
 pub fn with_cond<'a>(
@@ -1947,12 +1953,10 @@ pub fn trans_named_tuple_constructor<'a>(mut bcx: &'a Block<'a>,
     };
 
     if !type_is_zero_size(ccx, result_ty) {
-        let repr = adt::represent_type(ccx, result_ty);
-
         match args {
             callee::ArgExprs(exprs) => {
                 let fields = exprs.iter().map(|x| *x).enumerate().collect::<Vec<_>>();
-                bcx = expr::trans_adt(bcx, &*repr, disr, fields.as_slice(),
+                bcx = expr::trans_adt(bcx, result_ty, disr, fields.as_slice(),
                                       None, expr::SaveIn(llresult));
             }
             _ => ccx.sess().bug("expected expr as arguments for variant/struct tuple constructor")
@@ -2236,13 +2240,14 @@ pub fn get_fn_llvm_attributes(ccx: &CrateContext, fn_ty: ty::t)
         ty::ty_bare_fn(ref f) => (f.sig.clone(), f.abi, false),
         ty::ty_unboxed_closure(closure_did, _) => {
             let unboxed_closures = ccx.tcx.unboxed_closures.borrow();
-            let function_type = unboxed_closures.get(&closure_did)
-                                                .closure_type
-                                                .clone();
+            let ref function_type = unboxed_closures.get(&closure_did)
+                                                    .closure_type;
+
             (function_type.sig.clone(), RustCall, true)
         }
-        _ => fail!("expected closure or function.")
+        _ => ccx.sess().bug("expected closure or function.")
     };
+
 
     // Since index 0 is the return value of the llvm func, we start
     // at either 1 or 2 depending on whether there's an env slot or not
@@ -2250,12 +2255,29 @@ pub fn get_fn_llvm_attributes(ccx: &CrateContext, fn_ty: ty::t)
     let mut attrs = llvm::AttrBuilder::new();
     let ret_ty = fn_sig.output;
 
-    // These have an odd calling convention, so we skip them for now.
-    //
-    // FIXME(pcwalton): We don't have to skip them; just untuple the result.
-    if abi == RustCall {
-        return attrs;
-    }
+    // These have an odd calling convention, so we need to manually
+    // unpack the input ty's
+    let input_tys = match ty::get(fn_ty).sty {
+        ty::ty_unboxed_closure(_, _) => {
+            assert!(abi == RustCall);
+
+            match ty::get(fn_sig.inputs[0]).sty {
+                ty::ty_nil => Vec::new(),
+                ty::ty_tup(ref inputs) => inputs.clone(),
+                _ => ccx.sess().bug("expected tuple'd inputs")
+            }
+        },
+        ty::ty_bare_fn(_) if abi == RustCall => {
+            let inputs = vec![fn_sig.inputs[0]];
+
+            match ty::get(fn_sig.inputs[1]).sty {
+                ty::ty_nil => inputs,
+                ty::ty_tup(ref t_in) => inputs.append(t_in.as_slice()),
+                _ => ccx.sess().bug("expected tuple'd inputs")
+            }
+        }
+        _ => fn_sig.inputs.clone()
+    };
 
     // A function pointer is called without the declaration
     // available, so we have to apply any attributes with ABI
@@ -2280,7 +2302,7 @@ pub fn get_fn_llvm_attributes(ccx: &CrateContext, fn_ty: ty::t)
         match ty::get(ret_ty).sty {
             // `~` pointer return values never alias because ownership
             // is transferred
-            ty::ty_uniq(it)  if match ty::get(it).sty {
+            ty::ty_uniq(it) if match ty::get(it).sty {
                 ty::ty_str | ty::ty_vec(..) | ty::ty_trait(..) => true, _ => false
             } => {}
             ty::ty_uniq(_) => {
@@ -2311,7 +2333,7 @@ pub fn get_fn_llvm_attributes(ccx: &CrateContext, fn_ty: ty::t)
         }
     }
 
-    for (idx, &t) in fn_sig.inputs.iter().enumerate().map(|(i, v)| (i + first_arg_offset, v)) {
+    for (idx, &t) in input_tys.iter().enumerate().map(|(i, v)| (i + first_arg_offset, v)) {
         match ty::get(t).sty {
             // this needs to be first to prevent fat pointers from falling through
             _ if !type_is_immediate(ccx, t) => {
@@ -2356,14 +2378,20 @@ pub fn get_fn_llvm_attributes(ccx: &CrateContext, fn_ty: ty::t)
             }
 
             // `&mut` pointer parameters never alias other parameters, or mutable global data
-            // `&` pointer parameters never alias either (for LLVM's purposes) as long as the
-            // interior is safe
+            //
+            // `&T` where `T` contains no `UnsafeCell<U>` is immutable, and can be marked as both
+            // `readonly` and `noalias`, as LLVM's definition of `noalias` is based solely on
+            // memory dependencies rather than pointer equality
             ty::ty_rptr(b, mt) if mt.mutbl == ast::MutMutable ||
                                   !ty::type_contents(ccx.tcx(), mt.ty).interior_unsafe() => {
 
                 let llsz = llsize_of_real(ccx, type_of::type_of(ccx, mt.ty));
                 attrs.arg(idx, llvm::NoAliasAttribute)
                      .arg(idx, llvm::DereferenceableAttribute(llsz));
+
+                if mt.mutbl == ast::MutImmutable {
+                    attrs.arg(idx, llvm::ReadOnlyAttribute);
+                }
 
                 match b {
                     ReLateBound(_, BrAnon(_)) => {
@@ -2436,6 +2464,13 @@ pub fn create_entry_wrapper(ccx: &CrateContext,
                                &ccx.int_type);
 
         let llfn = decl_cdecl_fn(ccx, "main", llfty, ty::mk_nil());
+
+        // FIXME: #16581: Marking a symbol in the executable with `dllexport`
+        // linkage forces MinGW's linker to output a `.reloc` section for ASLR
+        if ccx.sess().targ_cfg.os == OsWindows {
+            unsafe { llvm::LLVMRustSetDLLExportStorageClass(llfn) }
+        }
+
         let llbb = "top".with_c_str(|buf| {
             unsafe {
                 llvm::LLVMAppendBasicBlockInContext(ccx.llcx, llfn, buf)

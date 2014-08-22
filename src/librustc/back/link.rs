@@ -1472,6 +1472,12 @@ fn link_args(cmd: &mut Command,
         // [1] - https://sourceware.org/bugzilla/show_bug.cgi?id=13130
         // [2] - https://code.google.com/p/go/issues/detail?id=2139
         cmd.arg("-Wl,--enable-long-section-names");
+
+        // Always enable DEP (NX bit) when it is available
+        cmd.arg("-Wl,--nxcompat");
+
+        // Mark all dynamic libraries and executables as compatible with ASLR
+        cmd.arg("-Wl,--dynamicbase");
     }
 
     if sess.targ_cfg.os == abi::OsAndroid {
