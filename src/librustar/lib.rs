@@ -15,16 +15,18 @@
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![crate_type = "bin"]
+#![feature(unsafe_destructor)]
 
 
 extern crate llvm = "rustc_llvm";
 extern crate libc;
 
+use llvmhelp::{ObjectFile};
 use std::os;
 use std::str::{from_utf8};
 use std::io::{File, IoError, EndOfFile};
-use libc::{size_t, c_char};
 
+mod llvmhelp;
 
 static MAGIC: &'static [u8] = b"!<arch>\n";
 static FMAG: &'static str = "`\n";
@@ -120,9 +122,11 @@ fn read_string<T: Reader>( reader: &mut T, len: uint, reason: &'static str ) -> 
 	let bytes = try!( reader.read_exact( len ).map_err(
 			|e| ArchiveIoError( e, reason ) ) );
 
-	match String::from_utf8( bytes ) {
-		Ok(s) => Ok(s),
-		Err(_) => Err(InvalidString( reason ))
+	match std::str::from_utf8( bytes.as_slice() ) {
+		Some(s) => {
+			Ok(s.trim_right_chars( '\0' ).into_string())
+		},
+		None => Err(InvalidString( reason ))
 	}
 }
 
@@ -377,42 +381,13 @@ impl Archive {
 	}
 }
 
-struct MemoryBuffer<'a> {
-	//data: &'a[u8],
-	pub llmb: llvm::MemoryBufferRef
-}
-
-impl<'a> MemoryBuffer<'a> {
-	pub fn new<'a>( data: &'a[u8], name: &str ) -> Option<MemoryBuffer<'a>> {
-		let buf = data.as_ptr() as *const c_char;
-		let lbuf = "hello.o".with_c_str( |name| unsafe {
-			llvm::LLVMCreateMemoryBufferWithMemoryRange( buf, data.len() as size_t, name, 0u32 )
-		} );
-		
-		if lbuf as int == 0 {
-			return None
-		}
-		Some( MemoryBuffer {
-			/*data: data,*/
-			llmb: lbuf
-		} )
-	}
-}
-
 
 fn read_symbols( member: &Member ) {
-	match MemoryBuffer::new( member.data.as_slice(), member.name.as_slice() ) {
+	match ObjectFile::new( member.data.as_slice(), member.name.as_slice() ) {
 		None => return,
-		Some(buf) => {
-			let obj = llvm::ObjectFile::new( buf.llmb ).unwrap();
-			unsafe {
-				let syms = llvm::LLVMGetSymbols( obj.llof );
-				while llvm::LLVMIsSymbolIteratorAtEnd( obj.llof, syms ) == llvm::False {
-					let namebuf = llvm::LLVMGetSymbolName( syms ) as *const u8;
-					let name = std::string::raw::from_buf( namebuf );
-					println!( "{}", name );
-					llvm::LLVMMoveToNextSymbol( syms );
-				}
+		Some(obj) => {
+			for sym in obj.symbols() {
+				println!( "{}: {} {}", member.name, sym.name, sym.address );
 			}
 		}
 	}
@@ -425,9 +400,7 @@ fn main() {
 		Err(x) => println!( "Error reading archive {}: {}", path.display(), x ),
 		Ok(x) => {
 			for m in x.members.iter() {
-				println!( "'{}'", m.name );
-				if m.name.as_slice().contains( ".o" ) {
-					println!( "{}: {}", m.name, m.data.len() );
+				if m.name.as_slice().ends_with( ".o" ) {
 					read_symbols( m );
 				}
 			}

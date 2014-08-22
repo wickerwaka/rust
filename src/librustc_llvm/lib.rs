@@ -358,6 +358,19 @@ pub enum CodeGenModel {
     CodeModelLarge = 5,
 }
 
+bitflags!(
+	flags SymbolFlags: u32 {
+		static SF_None = 0,
+		static SF_Undefined = 1 << 0,      // Symbol is defined in another object file
+		static SF_Global = 1 << 1,         // Global symbol
+		static SF_Weak = 1 << 2,           // Weak symbol
+		static SF_Absolute = 1 << 3,       // Absolute symbol
+		static SF_Common = 1 << 4,         // Symbol has common linkage
+		static SF_Indirect = 1 << 5,       // Symbol is an alias to another symbol
+		static SF_FormatSpecific = 1 << 6  // Specific to the object file format
+	}
+)
+
 // Opaque pointer types
 pub enum Module_opaque {}
 pub type ModuleRef = *mut Module_opaque;
@@ -1576,7 +1589,7 @@ extern {
 	pub fn LLVMGetSymbolName(SI: SymbolIteratorRef) -> *const c_char;
 	pub fn LLVMGetSymbolAddress(SI: SymbolIteratorRef) -> u64;
 	pub fn LLVMGetSymbolSize(SI: SymbolIteratorRef) -> u64;
-	pub fn LLVMGetSymbolFlags(SI: SymbolIteratorRef) -> u32;
+	pub fn LLVMRustGetSymbolFlags(SI: SymbolIteratorRef) -> SymbolFlags;
 
 
     /** Reads the given file and returns it as a memory buffer. Use
